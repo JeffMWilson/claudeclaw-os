@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { loadAgentConfig, listAgentIds, resolveAgentDir, resolveAgentClaudeMd } from './agent-config.js';
@@ -184,10 +185,23 @@ async function main(): Promise<void> {
     // War Room voice server (auto-start if enabled, with auto-respawn)
     if (WARROOM_ENABLED) {
       const { spawn } = await import('child_process');
-      const venvPython = path.join(PROJECT_ROOT, 'warroom', '.venv', 'bin', 'python');
+      const warroomVenvDir = path.join(PROJECT_ROOT, 'warroom', '.venv');
+      const venvPythonCandidates = process.platform === 'win32'
+        ? [
+            path.join(warroomVenvDir, 'Scripts', 'python.exe'),
+            path.join(warroomVenvDir, 'python.exe'),
+          ]
+        : [
+            path.join(warroomVenvDir, 'bin', 'python'),
+            path.join(warroomVenvDir, 'bin', 'python3'),
+          ];
+      const venvPython = venvPythonCandidates.find((p) => fs.existsSync(p)) || venvPythonCandidates[0];
       const serverScript = path.join(PROJECT_ROOT, 'warroom', 'server.py');
+      const warroomTmpDir = os.tmpdir();
+      const warroomAgentRosterPath = path.join(warroomTmpDir, 'warroom-agents.json');
+      const warroomDebugLogPath = path.join(warroomTmpDir, 'warroom-debug.log');
 
-      // Write agent roster to /tmp so the Python server can discover agents dynamically
+      // Write agent roster to temp dir so the Python server can discover agents dynamically
       try {
         const ids = ['main', ...listAgentIds().filter((id) => id !== 'main')];
         const roster = ids.map((id) => {
@@ -197,7 +211,7 @@ async function main(): Promise<void> {
             return { id, name: cfg.name || id, description: cfg.description || '' };
           } catch { return { id, name: id, description: '' }; }
         });
-        fs.writeFileSync('/tmp/warroom-agents.json', JSON.stringify(roster, null, 2));
+        fs.writeFileSync(warroomAgentRosterPath, JSON.stringify(roster, null, 2));
       } catch (err) {
         logger.warn({ err }, 'Could not write warroom agent roster');
       }
@@ -207,9 +221,12 @@ async function main(): Promise<void> {
         const { spawnSync } = await import('child_process');
         const depCheck = spawnSync(venvPython, ['-c', 'import pipecat'], { stdio: 'pipe', timeout: 10000 });
         if (depCheck.status !== 0) {
+          const depInstallCmd = process.platform === 'win32'
+            ? 'warroom\\.venv\\Scripts\\pip.exe install -r warroom/requirements.txt'
+            : 'source warroom/.venv/bin/activate\n'
+            + 'pip install -r warroom/requirements.txt';
           const msg = 'War Room Python dependencies not installed. Run:\n\n'
-            + 'source warroom/.venv/bin/activate\n'
-            + 'pip install -r warroom/requirements.txt\n\n'
+            + `${depInstallCmd}\n\n`
             + 'Then restart the bot.';
           logger.error(msg);
           if (ALLOWED_CHAT_ID) {
@@ -217,7 +234,7 @@ async function main(): Promise<void> {
           }
         } else {
         // Dedicated log file for the warroom subprocess
-        const warroomLogPath = '/tmp/warroom-debug.log';
+        const warroomLogPath = warroomDebugLogPath;
         let warroomLogFd: number | null = null;
         try {
           warroomLogFd = fs.openSync(warroomLogPath, 'a');
@@ -267,9 +284,9 @@ async function main(): Promise<void> {
             } else {
               respawnAttempts += 1;
               if (respawnAttempts > MAX_CRASH_RESPAWNS) {
-                logger.error(`War Room crashed ${MAX_CRASH_RESPAWNS} times. Giving up. Check /tmp/warroom-debug.log for errors.`);
+                logger.error(`War Room crashed ${MAX_CRASH_RESPAWNS} times. Giving up. Check ${warroomLogPath} for errors.`);
                 if (ALLOWED_CHAT_ID) {
-                  bot.api.sendMessage(ALLOWED_CHAT_ID, `War Room crashed ${MAX_CRASH_RESPAWNS} times and has been disabled.\n\nCheck /tmp/warroom-debug.log, fix the issue, and restart the bot.`).catch(() => {});
+                  bot.api.sendMessage(ALLOWED_CHAT_ID, `War Room crashed ${MAX_CRASH_RESPAWNS} times and has been disabled.\n\nCheck ${warroomLogPath}, fix the issue, and restart the bot.`).catch(() => {});
                 }
                 return;
               }
@@ -296,7 +313,9 @@ async function main(): Promise<void> {
         const missingVenv = !fs.existsSync(venvPython);
         const missingScript = !fs.existsSync(serverScript);
         const hint = missingVenv
-          ? 'Python venv not found. Run:\n\npython3 -m venv warroom/.venv\nsource warroom/.venv/bin/activate\npip install -r warroom/requirements.txt'
+          ? process.platform === 'win32'
+            ? 'Python venv not found. Run:\n\npy -3.13 -m venv warroom/.venv\nwarroom\\.venv\\Scripts\\pip.exe install -r warroom/requirements.txt'
+            : 'Python venv not found. Run:\n\npython3 -m venv warroom/.venv\nsource warroom/.venv/bin/activate\npip install -r warroom/requirements.txt'
           : 'warroom/server.py not found. Make sure the warroom/ directory exists.';
         logger.warn('War Room enabled but cannot start: %s', hint);
         if (ALLOWED_CHAT_ID) {
@@ -352,8 +371,28 @@ async function main(): Promise<void> {
     await bot.stop();
     process.exit(0);
   };
-  process.on('SIGINT', () => void shutdown());
+  // On Windows, SIGINT/Ctrl+Break can propagate up from spawned child
+  // processes (e.g. the claude CLI on tool-call cleanup) and kill us even
+  // when the user did not hit Ctrl+C themselves. Install no-op handlers so
+  // the default "exit on signal" does not fire. Stop via SIGTERM or kill.
+  if (process.platform === 'win32') {
+    process.on('SIGINT', () => {
+      logger.warn('SIGINT received on Windows — ignored (use taskkill to stop)');
+    });
+    process.on('SIGBREAK', () => {
+      logger.warn('SIGBREAK received on Windows — ignored');
+    });
+  } else {
+    process.on('SIGINT', () => void shutdown());
+  }
   process.on('SIGTERM', () => void shutdown());
+
+  process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, 'Unhandled promise rejection');
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error({ err }, 'Uncaught exception');
+  });
 
   logger.info({ agentId: AGENT_ID }, 'Starting ClaudeClaw...');
 

@@ -186,6 +186,13 @@ export async function runAgent(
   const secrets = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
 
   const sdkEnv: Record<string, string | undefined> = { ...process.env };
+  // Strip inherited Claude Code CLI env vars. If the parent process was itself
+  // launched from inside a Claude Code session, these vars leak in and cause
+  // the spawned `claude` subprocess to detect a nested session and exit 1.
+  delete sdkEnv.CLAUDECODE;
+  delete sdkEnv.CLAUDE_CODE_ENTRYPOINT;
+  delete sdkEnv.CLAUDE_CODE_EXECPATH;
+  delete sdkEnv.CLAUDE_CODE_SSE_PORT;
   if (secrets.CLAUDE_CODE_OAUTH_TOKEN) {
     sdkEnv.CLAUDE_CODE_OAUTH_TOKEN = secrets.CLAUDE_CODE_OAUTH_TOKEN;
   }

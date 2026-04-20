@@ -1175,9 +1175,7 @@ export function createBot(): Bot {
     const base = DASHBOARD_URL || `http://localhost:${DASHBOARD_PORT}`;
     const url = `${base}/?token=${DASHBOARD_TOKEN}&chatId=${chatIdStr}`;
 
-    const { InlineKeyboard } = await import('grammy');
-    const keyboard = new InlineKeyboard().url('Open Dashboard', url);
-    await ctx.reply('Dashboard', { reply_markup: keyboard });
+    await ctx.reply(`Dashboard:\n${url}`);
   });
 
   // /stop — interrupt the current agent query
