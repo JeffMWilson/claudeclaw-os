@@ -46,6 +46,11 @@ outputs/
 scripts/waste-reminder.sh
 start-main.sh
 WARROOM_TEST_PLAN.md
+scripts/ob1-migrate.py
+
+# Local Claude tooling config (machine/user-specific)
+.claude/settings.json
+.claude/settings.local.json
 
 # War Room dev/test artifacts
 warroom/test-audio*.wav
