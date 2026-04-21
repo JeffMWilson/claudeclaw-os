@@ -29,6 +29,8 @@ import {
   DAILY_COST_BUDGET,
   HOURLY_TOKEN_BUDGET,
   PROJECT_ROOT,
+  VOICE_MODE_DEFAULT_ON,
+  VOICE_REPLY_TO_VOICE_MESSAGES_DEFAULT_ON,
 } from './config.js';
 import { clearSession, getRecentConversation, getRecentMemories, getRecentTaskOutputs, getSession, getSessionConversation, logToHiveMind, pinMemory, unpinMemory, setSession, lookupWaChatId, saveWaMessageMap, saveTokenUsage, saveCompactionEvent, getCompactionCount } from './db.js';
 import { logger } from './logger.js';
@@ -674,7 +676,7 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
     // Voice response: send audio if user sent a voice note (forceVoiceReply)
     // OR if they've toggled /voice on for text messages.
     const caps = voiceCapabilities();
-    const shouldSpeakBack = caps.tts && (forceVoiceReply || voiceEnabledChats.has(chatIdStr));
+    const shouldSpeakBack = caps.tts && (forceVoiceReply || voiceEnabledChats.has(chatIdStr) || VOICE_MODE_DEFAULT_ON);
 
     // Send text response (if there's any left after stripping markers)
     const textWithFooter = responseText ? responseText + costFooter : '';
@@ -683,7 +685,13 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
         try {
           // Don't speak the cost footer, just the actual response
           const audioBuffer = await synthesizeSpeech(responseText);
-          await ctx.replyWithVoice(new InputFile(audioBuffer, 'response.ogg'));
+          try {
+            await ctx.replyWithVoice(new InputFile(audioBuffer, 'response.ogg'));
+          } catch {
+            // Some providers return MP3/WAV. If Telegram rejects voice-note
+            // format, fall back to regular audio playback.
+            await ctx.replyWithAudio(new InputFile(audioBuffer, 'response.mp3'));
+          }
         } catch (ttsErr) {
           logger.error({ err: ttsErr }, 'TTS failed, falling back to text');
           for (const part of splitMessage(formatForTelegram(textWithFooter))) {
@@ -1457,8 +1465,9 @@ export function createBot(): Bot {
       const fileId = ctx.message.voice.file_id;
       const localPath = await downloadTelegramFile(activeBotToken, fileId, UPLOADS_DIR);
       const transcribed = await transcribeAudio(localPath);
-      // Only reply with voice if explicitly requested — otherwise execute and respond in text
-      const wantsVoiceBack = /\b(respond (with|via|in) voice|send (me )?(a )?voice( note| back)?|voice reply|reply (with|via) voice)\b/i.test(transcribed);
+      // Voice-note reply mode can be default-on via env, or requested ad-hoc in speech.
+      const wantsVoiceBack = VOICE_REPLY_TO_VOICE_MESSAGES_DEFAULT_ON
+        || /\b(respond (with|via|in) voice|send (me )?(a )?voice( note| back)?|voice reply|reply (with|via) voice)\b/i.test(transcribed);
       const chatIdStr = ctx.chat!.id.toString();
       messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, `[Voice transcribed]: ${transcribed}`, wantsVoiceBack));
     } catch (err) {

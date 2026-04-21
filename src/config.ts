@@ -10,6 +10,8 @@ const envConfig = readEnvFile([
   'GROQ_API_KEY',
   'ELEVENLABS_API_KEY',
   'ELEVENLABS_VOICE_ID',
+  'VOICE_MODE_DEFAULT_ON',
+  'VOICE_REPLY_TO_VOICE_MESSAGES_DEFAULT_ON',
   'WHATSAPP_ENABLED',
   'DISCORD_ENABLED',
   'DISCORD_BOT_TOKEN',
@@ -98,6 +100,10 @@ export const SLACK_USER_TOKEN =
 export const GROQ_API_KEY = envConfig.GROQ_API_KEY ?? '';
 export const ELEVENLABS_API_KEY = envConfig.ELEVENLABS_API_KEY ?? '';
 export const ELEVENLABS_VOICE_ID = envConfig.ELEVENLABS_VOICE_ID ?? '';
+export const VOICE_MODE_DEFAULT_ON =
+  (process.env.VOICE_MODE_DEFAULT_ON || envConfig.VOICE_MODE_DEFAULT_ON || '').toLowerCase() === 'true';
+export const VOICE_REPLY_TO_VOICE_MESSAGES_DEFAULT_ON =
+  (process.env.VOICE_REPLY_TO_VOICE_MESSAGES_DEFAULT_ON || envConfig.VOICE_REPLY_TO_VOICE_MESSAGES_DEFAULT_ON || '').toLowerCase() === 'true';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

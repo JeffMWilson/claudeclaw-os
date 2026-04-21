@@ -387,7 +387,14 @@ To get a voice reply back from a specific voice note, say one of these anywhere 
 "reply with voice"      "reply via voice"
 ```
 
-To toggle voice replies on permanently for all messages, send `/voice`. Send it again to turn it off. Resets on restart.
+To toggle voice replies in-chat, send `/voice`. Send it again to turn it off. This is per-chat and resets on restart.
+
+For always-on team behavior (main + all sub-agents), set these in `.env`:
+```bash
+VOICE_MODE_DEFAULT_ON=true
+VOICE_REPLY_TO_VOICE_MESSAGES_DEFAULT_ON=true
+```
+`VOICE_MODE_DEFAULT_ON` is equivalent to turning `/voice` on everywhere. `VOICE_REPLY_TO_VOICE_MESSAGES_DEFAULT_ON` makes every voice note get a voice reply automatically.
 
 Voice output uses a cascade of TTS providers. If the first one fails, it tries the next:
 
@@ -406,10 +413,11 @@ Voice note sent
   ↓
 Groq Whisper → transcribed text
   ↓
-Check for voice-back trigger phrases
-  ├── found → Claude runs → TTS cascade → audio reply
+Check voice reply mode
+  ├── voice-default enabled or voice-back trigger phrase found
+  │      → Claude runs → TTS cascade → audio reply
   │                         (ElevenLabs → Gradium → macOS say)
-  └── not found → Claude runs → text reply
+  └── otherwise → Claude runs → text reply
 ```
 
 > **Want full voice conversations?** The War Room (experimental) lets you have live voice meetings with your agent team using Gemini Live. No Deepgram or Cartesia needed. The recommended setup is just `GOOGLE_API_KEY`. See the War Room section below.
@@ -457,7 +465,7 @@ Every skill in `~/.claude/skills/` loads on every session. Call them directly (`
 | `/help` | List all available commands |
 | `/stop` | Cancel the current agent query mid-execution. works from Telegram and the dashboard |
 | `/model` | Switch Claude model for this chat. `/model haiku` for speed, `/model sonnet` for balance, `/model opus` (default) for full power. Resets on restart |
-| `/voice` | Toggle voice replies on/off for all messages. When off, voice notes still get transcribed and executed. replies just come back as text |
+| `/voice` | Toggle voice replies on/off for this chat. If `VOICE_MODE_DEFAULT_ON=true`, voice is already on globally unless you toggle it off per chat |
 | `/newchat` | Wipe the Claude Code session and start fresh. Use when context gets stale or the conversation window is filling up |
 | `/respin` | Pull the last 20 conversation turns back into a fresh session. Run this right after `/newchat` to keep recent context without the full token weight |
 | `/memory` | Show what the bot remembers about you (recent memories from SQLite) |
@@ -1349,6 +1357,8 @@ Browse more: [github.com/anthropics/claude-code](https://github.com/anthropics/c
 | `GROQ_API_KEY` | No | Voice input. [console.groq.com](https://console.groq.com) |
 | `ELEVENLABS_API_KEY` | No | Voice output. [elevenlabs.io](https://elevenlabs.io) |
 | `ELEVENLABS_VOICE_ID` | No | Your ElevenLabs voice ID string |
+| `VOICE_MODE_DEFAULT_ON` | No | Enable voice replies by default for all agents/chats (`true` / `false`) |
+| `VOICE_REPLY_TO_VOICE_MESSAGES_DEFAULT_ON` | No | Always answer voice notes with voice (`true` / `false`) |
 | `GOOGLE_API_KEY` | No | Gemini. [aistudio.google.com](https://aistudio.google.com) |
 | `DISCORD_ENABLED` | No | Enable Discord bridge (`true` / `false`) |
 | `DISCORD_BOT_TOKEN` | No | Discord bot token from Discord Developer Portal |

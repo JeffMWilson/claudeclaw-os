@@ -23,5 +23,10 @@
     "voice_id": "2ee87190-8f84-4925-97da-e52547f9462c",
     "gemini_voice": "Alnilam",
     "name": "Alnilam / American Male (firm, direct)"
+  },
+  "chiefofstaff": {
+    "voice_id": "a0e99841-438c-4a64-b679-ae501e7d6091",
+    "gemini_voice": "Charon",
+    "name": "Charon / British Male (chief of staff)"
   }
 }
