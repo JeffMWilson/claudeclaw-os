@@ -11,6 +11,9 @@ const envConfig = readEnvFile([
   'ELEVENLABS_API_KEY',
   'ELEVENLABS_VOICE_ID',
   'WHATSAPP_ENABLED',
+  'DISCORD_ENABLED',
+  'DISCORD_BOT_TOKEN',
+  'DISCORD_ALLOWED_CHANNEL_ID',
   'SLACK_USER_TOKEN',
   'CONTEXT_LIMIT',
   'DASHBOARD_PORT',
@@ -79,6 +82,14 @@ export let ALLOWED_CHAT_ID =
 
 export const WHATSAPP_ENABLED =
   (process.env.WHATSAPP_ENABLED || envConfig.WHATSAPP_ENABLED || '').toLowerCase() === 'true';
+export const DISCORD_ENABLED =
+  (process.env.DISCORD_ENABLED || envConfig.DISCORD_ENABLED || '').toLowerCase() === 'true';
+
+export const DISCORD_BOT_TOKEN =
+  process.env.DISCORD_BOT_TOKEN || envConfig.DISCORD_BOT_TOKEN || '';
+
+export const DISCORD_ALLOWED_CHANNEL_ID =
+  process.env.DISCORD_ALLOWED_CHANNEL_ID || envConfig.DISCORD_ALLOWED_CHANNEL_ID || '';
 
 export const SLACK_USER_TOKEN =
   process.env.SLACK_USER_TOKEN || envConfig.SLACK_USER_TOKEN || '';
@@ -243,7 +254,7 @@ export const EXFILTRATION_GUARD_ENABLED =
   (process.env.EXFILTRATION_GUARD_ENABLED || envConfig.EXFILTRATION_GUARD_ENABLED || 'true').toLowerCase() === 'true';
 export const PROTECTED_ENV_VARS = (
   process.env.PROTECTED_ENV_VARS || envConfig.PROTECTED_ENV_VARS ||
-  'ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN,DB_ENCRYPTION_KEY,TELEGRAM_BOT_TOKEN,SLACK_USER_TOKEN,GROQ_API_KEY,ELEVENLABS_API_KEY,GOOGLE_API_KEY'
+  'ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN,DB_ENCRYPTION_KEY,TELEGRAM_BOT_TOKEN,DISCORD_BOT_TOKEN,SLACK_USER_TOKEN,GROQ_API_KEY,ELEVENLABS_API_KEY,GOOGLE_API_KEY'
 ).split(',').map((s) => s.trim()).filter(Boolean);
 
 // ── War Room (voice meeting via Pipecat WebSocket) ──────────────────

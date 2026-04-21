@@ -151,6 +151,33 @@ export async function downloadTelegramFile(
 }
 
 /**
+ * Download a remote media file (e.g., Discord attachment URL) to a local path.
+ * Returns the absolute local file path.
+ */
+export async function downloadRemoteFile(
+  url: string,
+  destDir: string,
+  filenameHint?: string,
+): Promise<string> {
+  mkdirSync(destDir, { recursive: true });
+  const fileBuffer = await httpsGet(url);
+
+  let ext = '';
+  try {
+    ext = path.extname(new URL(url).pathname);
+  } catch {
+    ext = '';
+  }
+  if (!ext && filenameHint) ext = path.extname(filenameHint);
+  if (!ext) ext = '.ogg';
+
+  const filename = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}${ext}`;
+  const localPath = path.join(destDir, filename);
+  fs.writeFileSync(localPath, fileBuffer);
+  return localPath;
+}
+
+/**
  * Transcribe an audio file using Groq's Whisper API.
  * Supports .ogg, .mp3, .wav, .m4a.
  */

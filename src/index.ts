@@ -8,6 +8,7 @@ import { checkPendingMigrations } from './migrations.js';
 import { ALLOWED_CHAT_ID, activeBotToken, STORE_DIR, PROJECT_ROOT, CLAUDECLAW_CONFIG, GOOGLE_API_KEY, setAgentOverrides, SECURITY_PIN_HASH, IDLE_LOCK_MINUTES, EMERGENCY_KILL_PHRASE, WARROOM_ENABLED, WARROOM_PORT } from './config.js';
 import { startDashboard } from './dashboard.js';
 import { initDatabase, cleanupOldMissionTasks, insertAuditLog } from './db.js';
+import { startDiscordBridge, stopDiscordBridge } from './discord.js';
 import { initSecurity, setAuditCallback } from './security.js';
 import { logger } from './logger.js';
 import { cleanupOldUploads } from './media.js';
@@ -182,6 +183,7 @@ async function main(): Promise<void> {
   // Dashboard only runs in the main bot process
   if (AGENT_ID === 'main') {
     startDashboard(bot.api);
+    await startDiscordBridge();
 
     // War Room voice server (auto-start if enabled, with auto-respawn)
     if (WARROOM_ENABLED) {
@@ -368,6 +370,7 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     logger.info('Shutting down...');
     setTelegramConnected(false);
+    await stopDiscordBridge();
     releaseLock();
     await bot.stop();
     process.exit(0);

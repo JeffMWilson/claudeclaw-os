@@ -65,6 +65,7 @@ These are powerful but require extra API keys or services. Each one has its own 
 | **Memory consolidation** | `GOOGLE_API_KEY` | Gemini detects patterns across conversations |
 | **War Room** | `GOOGLE_API_KEY` + Python venv | Live voice boardroom with your agent team via Gemini Live |
 | **WhatsApp bridge** | Puppeteer + QR scan | Highly experimental. Read/send WhatsApp from Telegram |
+| **Discord bridge** | Discord bot token + channel ID | Read text + transcribe voice messages/audio attachments |
 
 ---
 
@@ -99,7 +100,7 @@ Without this, git operations will fail with a confusing error about missing iden
 
 **New to the terminal?** Download [Warp](https://www.warp.dev), it's a modern terminal with AI built in. If you hit any OS-level issues during setup (permissions, missing tools, PATH problems), type `/agent` in Warp and describe what went wrong. It will walk you through fixing it. This alone will save you hours of Googling.
 
-That's it for hard requirements. Everything else (voice, video, WhatsApp) is optional and the setup wizard will ask about them.
+That's it for hard requirements. Everything else (voice, video, WhatsApp, Discord bridge) is optional.
 
 ---
 
@@ -957,6 +958,40 @@ The `store/` directory (database, WhatsApp session, logs) is gitignored with mul
 
 ---
 
+## Discord bridge (experimental)
+
+Discord support is opt-in and runs alongside Telegram. It listens in one configured channel and routes messages through the same Claude pipeline.
+
+### What it supports
+
+- Plain text Discord messages
+- Discord voice messages and audio attachments (`.ogg`, `.mp3`, `.wav`, `.m4a`, `.webm`, etc.)
+- Automatic transcription via the existing STT cascade (`GROQ_API_KEY` → local whisper-cpp fallback)
+
+### Setup
+
+1. Create a Discord bot in the Discord Developer Portal.
+2. Enable **Message Content Intent** for the bot.
+3. Invite the bot to your server/channel with:
+   - View Channel
+   - Send Messages
+   - Read Message History
+4. Add to `.env`:
+   ```env
+   DISCORD_ENABLED=true
+   DISCORD_BOT_TOKEN=your-discord-bot-token
+   DISCORD_ALLOWED_CHANNEL_ID=your-channel-id
+   ```
+5. Restart ClaudeClaw.
+
+### Notes
+
+- The bridge only reads one channel (`DISCORD_ALLOWED_CHANNEL_ID`).
+- Conversation sessions are isolated per Discord user inside that channel.
+- Audio files are downloaded to `workspace/uploads/`, transcribed, then deleted after processing.
+
+---
+
 ## Memory
 
 ![ClaudeClaw OS memory system](assets/memory-diagram.jpeg)
@@ -1315,6 +1350,9 @@ Browse more: [github.com/anthropics/claude-code](https://github.com/anthropics/c
 | `ELEVENLABS_API_KEY` | No | Voice output. [elevenlabs.io](https://elevenlabs.io) |
 | `ELEVENLABS_VOICE_ID` | No | Your ElevenLabs voice ID string |
 | `GOOGLE_API_KEY` | No | Gemini. [aistudio.google.com](https://aistudio.google.com) |
+| `DISCORD_ENABLED` | No | Enable Discord bridge (`true` / `false`) |
+| `DISCORD_BOT_TOKEN` | No | Discord bot token from Discord Developer Portal |
+| `DISCORD_ALLOWED_CHANNEL_ID` | No | Single Discord channel ID ClaudeClaw will listen to |
 | `SLACK_USER_TOKEN` | No | Slack User OAuth Token (starts with `xoxp-`) |
 | `GOOGLE_CREDS_PATH` | No | Path to Google OAuth credentials.json (default: `~/.config/gmail/credentials.json`) |
 | `GMAIL_TOKEN_PATH` | No | Path to Gmail OAuth token (default: `~/.config/gmail/token.json`) |
@@ -1610,6 +1648,7 @@ claudeclaw/
 │   ├── slack.ts             Slack API client (conversations, messages, send)
 │   ├── slack-cli.ts         CLI wrapper for Slack (used by the slack skill)
 │   ├── whatsapp.ts          WhatsApp client via whatsapp-web.js
+│   ├── discord.ts           Discord bridge (text + voice/audio attachments)
 │   ├── dashboard.ts         Web dashboard server (Hono + API routes + token auth)
 │   ├── dashboard-html.ts    Dashboard HTML/CSS/JS (Tailwind + Chart.js, no build step)
 │   ├── state.ts             Shared state and SSE event emitter
