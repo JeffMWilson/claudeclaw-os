@@ -54,6 +54,7 @@ export function setAgentOverrides(opts: {
   agentId: string;
   botToken: string;
   cwd: string;
+  allowedChatId?: string;
   model?: string;
   obsidian?: { vault: string; folders: string[]; readOnly?: string[] };
   systemPrompt?: string;
@@ -66,13 +67,14 @@ export function setAgentOverrides(opts: {
   agentObsidianConfig = opts.obsidian;
   agentSystemPrompt = opts.systemPrompt;
   agentMcpAllowlist = opts.mcpServers;
+  ALLOWED_CHAT_ID = opts.allowedChatId || process.env.ALLOWED_CHAT_ID || envConfig.ALLOWED_CHAT_ID || '';
 }
 
 export const TELEGRAM_BOT_TOKEN =
   process.env.TELEGRAM_BOT_TOKEN || envConfig.TELEGRAM_BOT_TOKEN || '';
 
 // Only respond to this Telegram chat ID. Set this after getting your ID via /chatid.
-export const ALLOWED_CHAT_ID =
+export let ALLOWED_CHAT_ID =
   process.env.ALLOWED_CHAT_ID || envConfig.ALLOWED_CHAT_ID || '';
 
 export const WHATSAPP_ENABLED =

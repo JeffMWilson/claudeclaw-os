@@ -10,6 +10,7 @@ export interface AgentConfig {
   description: string;
   botTokenEnv: string;
   botToken: string;
+  allowedChatId?: string;
   model?: string;
   mcpServers?: string[];
   obsidian?: {
@@ -66,6 +67,7 @@ export function loadAgentConfig(agentId: string): AgentConfig {
   const name = raw['name'] as string;
   const description = (raw['description'] as string) ?? '';
   const botTokenEnv = raw['telegram_bot_token_env'] as string;
+  const allowedChatId = raw['allowed_chat_id'] as string | undefined;
   const model = raw['model'] as string | undefined;
 
   if (!name || !botTokenEnv) {
@@ -103,6 +105,7 @@ export function loadAgentConfig(agentId: string): AgentConfig {
     description,
     botTokenEnv,
     botToken,
+    allowedChatId,
     model,
     mcpServers,
     obsidian,

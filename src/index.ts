@@ -39,6 +39,7 @@ if (AGENT_ID !== 'main') {
     agentId: AGENT_ID,
     botToken: agentConfig.botToken,
     cwd: agentDir,
+    allowedChatId: agentConfig.allowedChatId,
     model: agentConfig.model,
     obsidian: agentConfig.obsidian,
     systemPrompt,
