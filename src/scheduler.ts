@@ -42,6 +42,18 @@ const runningTaskIds = new Set<string>();
  */
 let schedulerAgentId = 'main';
 
+/**
+ * Deterministic startup delay per agent (1-10s) to avoid all PM2 processes
+ * hammering SQLite with crash-recovery writes at the same instant.
+ */
+function computeStartupDelayMs(agentId: string): number {
+  let hash = 0;
+  for (let i = 0; i < agentId.length; i++) {
+    hash = ((hash * 31) + agentId.charCodeAt(i)) >>> 0;
+  }
+  return 1000 + (hash % 9001); // 1000..10000ms
+}
+
 export function initScheduler(send: Sender, agentId = 'main'): void {
   if (!ALLOWED_CHAT_ID) {
     logger.warn('ALLOWED_CHAT_ID not set — scheduler will not send results');
@@ -49,18 +61,23 @@ export function initScheduler(send: Sender, agentId = 'main'): void {
   sender = send;
   schedulerAgentId = agentId;
 
-  // Recover tasks stuck in 'running' from a previous crash
-  const recovered = resetStuckTasks(agentId);
-  if (recovered > 0) {
-    logger.warn({ recovered, agentId }, 'Reset stuck tasks from previous crash');
-  }
-  const recoveredMission = resetStuckMissionTasks(agentId);
-  if (recoveredMission > 0) {
-    logger.warn({ recovered: recoveredMission, agentId }, 'Reset stuck mission tasks from previous crash');
-  }
+  const startupDelayMs = computeStartupDelayMs(agentId);
+  setTimeout(() => {
+    // Recover tasks stuck in 'running' from a previous crash.
+    // This is delayed per-agent to reduce SQLITE_BUSY contention when many
+    // agents restart simultaneously.
+    const recovered = resetStuckTasks(agentId);
+    if (recovered > 0) {
+      logger.warn({ recovered, agentId }, 'Reset stuck tasks from previous crash');
+    }
+    const recoveredMission = resetStuckMissionTasks(agentId);
+    if (recoveredMission > 0) {
+      logger.warn({ recovered: recoveredMission, agentId }, 'Reset stuck mission tasks from previous crash');
+    }
+  }, startupDelayMs);
 
   setInterval(() => void runDueTasks(), 60_000);
-  logger.info({ agentId }, 'Scheduler started (checking every 60s)');
+  logger.info({ agentId, startupDelayMs }, 'Scheduler started (checking every 60s)');
 }
 
 async function runDueTasks(): Promise<void> {

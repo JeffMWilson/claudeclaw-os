@@ -1271,6 +1271,9 @@ function setupWindows() {
   info('  and re-run setup. Keep ~/.claude/ inside WSL2, not the Windows mount.');
   console.log();
   info('Option B — PM2 (native Windows):');
+  info('  Set PIDUSAGE_SILENT first to suppress pidusage wmic ENOENT noise:');
+  console.log(`  ${c.cyan}setx PIDUSAGE_SILENT 1${c.reset}`);
+  info('  Then restart your terminal so PM2 inherits the new environment.');
   console.log(`  ${c.cyan}npm install -g pm2${c.reset}`);
   console.log(`  ${c.cyan}pm2 start dist/index.js --name claudeclaw${c.reset}`);
   console.log(`  ${c.cyan}pm2 save${c.reset}`);

@@ -24,11 +24,19 @@ vi.mock('./logger.js', () => ({
   },
 }));
 
+vi.mock('child_process', () => ({
+  execFileSync: vi.fn(),
+}));
+
 import { runAgentWithRetry } from './agent.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { execFileSync } from 'child_process';
+import { logger } from './logger.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mockQuery = query as any;
+const mockExecFileSync = vi.mocked(execFileSync);
+const mockLoggerWarn = vi.mocked(logger.warn);
 const noop = () => {};
 
 /**
@@ -97,6 +105,36 @@ describe('runAgentWithRetry', () => {
     expect(callCount).toBe(2);
     expect(onRetry).toHaveBeenCalledTimes(1);
     expect(onRetry).toHaveBeenCalledWith(1, expect.objectContaining({ category: 'rate_limit' }));
+  }, 15000);
+
+  it('uses recovery.retryAfterMs as retry backoff base', async () => {
+    const retryableError = new AgentError('network', {
+      shouldRetry: true,
+      shouldNewChat: false,
+      shouldSwitchModel: false,
+      retryAfterMs: 500,
+      userMessage: 'Network glitch',
+    });
+
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    let callCount = 0;
+    mockQuery.mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) throw retryableError;
+      return mockQueryEvents([
+        { type: 'system', subtype: 'init', session_id: 'sess-1' },
+        resultEvent('Recovered with custom backoff'),
+      ])();
+    });
+
+    const result = await runAgentWithRetry('hi', undefined, noop);
+    expect(result.text).toBe('Recovered with custom backoff');
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      expect.objectContaining({ attempt: 1, category: 'network', delayMs: 500 }),
+      'Retrying agent query',
+    );
+
+    randomSpy.mockRestore();
   }, 15000);
 
   it('does not retry non-retryable errors', async () => {
@@ -201,4 +239,60 @@ describe('runAgentWithRetry', () => {
     expect(capturedModels[0]).toBe('claude-opus-4-6');
     expect(capturedModels[1]).toBe('claude-sonnet-4-6');
   }, 15000);
+
+  it('classifies exit-code-1 as billing when CLI probe reports usage limit', async () => {
+    mockQuery.mockImplementation(() => {
+      throw new Error('Claude Code process exited with code 1');
+    });
+
+    const probeErr = Object.assign(new Error('probe failed'), {
+      stderr: "You've hit your limit · resets in 2 hours",
+    });
+    mockExecFileSync.mockImplementation(() => {
+      throw probeErr;
+    });
+
+    try {
+      await runAgentWithRetry('hi', undefined, noop);
+      throw new Error('Expected runAgentWithRetry to throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AgentError);
+      const agentErr = err as AgentError;
+      expect(agentErr.category).toBe('billing');
+      expect(agentErr.recovery.shouldRetry).toBe(false);
+      expect(agentErr.recovery.shouldSwitchModel).toBe(true);
+      expect(agentErr.recovery.userMessage).toContain('usage limit reached');
+    }
+
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies exit-code-1 as auth when CLI probe reports login required', async () => {
+    mockQuery.mockImplementation(() => {
+      throw new Error('Claude Code process exited with code 1');
+    });
+
+    const probeErr = Object.assign(new Error('probe failed'), {
+      stderr: 'Login required: not authenticated',
+    });
+    mockExecFileSync.mockImplementation(() => {
+      throw probeErr;
+    });
+
+    try {
+      await runAgentWithRetry('hi', undefined, noop);
+      throw new Error('Expected runAgentWithRetry to throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AgentError);
+      const agentErr = err as AgentError;
+      expect(agentErr.category).toBe('auth');
+      expect(agentErr.recovery.shouldRetry).toBe(false);
+      expect(agentErr.recovery.shouldSwitchModel).toBe(false);
+      expect(agentErr.recovery.userMessage).toContain('claude login');
+    }
+
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
 });

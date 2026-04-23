@@ -482,7 +482,7 @@ export async function runAgent(
 
 const MAX_RETRIES = 2;
 const BACKOFF_BASE_MS = 2000;
-const BACKOFF_MULTIPLIER = 4; // 2s, 8s
+const BACKOFF_MULTIPLIER = 4;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -534,8 +534,11 @@ export async function runAgentWithRetry(
         throw err;
       }
 
+      const configuredBaseDelayMs = err.recovery.retryAfterMs > 0
+        ? err.recovery.retryAfterMs
+        : BACKOFF_BASE_MS;
       const delayMs = Math.min(
-        BACKOFF_BASE_MS * Math.pow(BACKOFF_MULTIPLIER, attempt),
+        configuredBaseDelayMs * Math.pow(BACKOFF_MULTIPLIER, attempt),
         60000,
       );
       // Add jitter (0-25% of delay)

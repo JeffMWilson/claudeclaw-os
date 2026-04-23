@@ -198,6 +198,8 @@ journalctl --user -u claudeclaw -f
 
 **Windows**: use WSL2 (recommended) and follow the Linux steps, or:
 ```bash
+setx PIDUSAGE_SILENT 1
+# restart terminal after setx so PM2 inherits it
 npm install -g pm2
 pm2 start dist/index.js --name claudeclaw
 pm2 save && pm2 startup
@@ -1491,6 +1493,10 @@ Or view it in the dashboard via the API: `GET /api/audit?limit=50`.
 **Git errors during setup**
 - "Please tell me who you are". run `git config --global user.name "Your Name"` and `git config --global user.email "you@email.com"`
 - Git needs these set once, globally, before it can do anything
+**PM2 logs show `spawn wmic ENOENT` on Windows**
+- This is pidusage noise on modern Windows where `wmic` is absent; it does not mean ClaudeClaw is broken
+- Set `PIDUSAGE_SILENT` once: `setx PIDUSAGE_SILENT 1`
+- Restart your terminal, then restart PM2 (`pm2 kill` then `pm2 resurrect`)
 
 **Can't access the internet / "break out"**
 - ClaudeClaw runs the real Claude Code CLI, which has full internet access through its built-in tools (web search, web fetch, bash with curl, etc.)
