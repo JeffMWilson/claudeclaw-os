@@ -1,6 +1,6 @@
 import { CronExpressionParser } from 'cron-parser';
 
-import { AGENT_ID, ALLOWED_CHAT_ID, agentMcpAllowlist } from './config.js';
+import { AGENT_ID, AGENT_TIMEOUT_MS, ALLOWED_CHAT_ID, agentMcpAllowlist } from './config.js';
 import {
   getDueTasks,
   getSession,
@@ -14,13 +14,19 @@ import {
 } from './db.js';
 import { logger } from './logger.js';
 import { messageQueue } from './message-queue.js';
-import { runAgent } from './agent.js';
+import { runAgent, runAgentWithRetry } from './agent.js';
 import { formatForTelegram, splitMessage } from './bot.js';
 
 type Sender = (text: string) => Promise<void>;
 
-/** Max time (ms) a scheduled task can run before being killed. */
-const TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+/**
+ * All agent tasks (scheduled and mission) use the same timeout as Telegram
+ * conversations. Configured via AGENT_TIMEOUT_MS in .env (default 45 min).
+ * Previously scheduled tasks had 10 min and missions had 20 min, which caused
+ * Opus-model research tasks to get killed mid-execution.
+ */
+const TASK_TIMEOUT_MS = AGENT_TIMEOUT_MS;
+const MISSION_TIMEOUT_MS = AGENT_TIMEOUT_MS;
 
 let sender: Sender;
 
@@ -90,13 +96,19 @@ async function runDueTasks(): Promise<void> {
       try {
         await sender(`Scheduled task running: "${task.prompt.slice(0, 80)}${task.prompt.length > 80 ? '...' : ''}"`);
 
-        // Run as a fresh agent call (no session — scheduled tasks are autonomous)
-        const result = await runAgent(task.prompt, undefined, () => {}, undefined, undefined, abortController, undefined, agentMcpAllowlist);
+        // Run as a fresh agent call with retry (no session — scheduled tasks are autonomous)
+        const result = await runAgentWithRetry(
+          task.prompt, undefined, () => {}, undefined, undefined,
+          abortController, undefined,
+          (attempt, err) => logger.warn({ taskId: task.id, attempt, category: err.category }, 'Retrying scheduled task'),
+          undefined, agentMcpAllowlist,
+        );
         clearTimeout(timeout);
 
+        const timeoutMins = Math.round(TASK_TIMEOUT_MS / 60000);
         if (result.aborted) {
-          updateTaskAfterRun(task.id, nextRun, 'Timed out after 10 minutes', 'timeout');
-          await sender(`⏱ Task timed out after 10m: "${task.prompt.slice(0, 60)}..." — killed.`);
+          updateTaskAfterRun(task.id, nextRun, `Timed out after ${timeoutMins} minutes`, 'timeout');
+          await sender(`⏱ Task timed out after ${timeoutMins}m: "${task.prompt.slice(0, 60)}..." — killed.`);
           logger.warn({ taskId: task.id }, 'Task timed out');
           return;
         }
@@ -138,7 +150,14 @@ async function runDueTasks(): Promise<void> {
 }
 
 async function runDueMissionTasks(): Promise<void> {
-  const mission = claimNextMissionTask(schedulerAgentId);
+  let mission: ReturnType<typeof claimNextMissionTask>;
+  try {
+    mission = claimNextMissionTask(schedulerAgentId);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.warn({ err: errMsg, agentId: schedulerAgentId }, 'Could not claim mission task (will retry next tick)');
+    return;
+  }
   if (!mission) return;
 
   const missionKey = 'mission-' + mission.id;
@@ -150,14 +169,20 @@ async function runDueMissionTasks(): Promise<void> {
   const chatId = ALLOWED_CHAT_ID || 'mission';
   messageQueue.enqueue(chatId, async () => {
     const abortController = new AbortController();
-    const timeout = setTimeout(() => abortController.abort(), TASK_TIMEOUT_MS);
+    const timeout = setTimeout(() => abortController.abort(), MISSION_TIMEOUT_MS);
 
     try {
-      const result = await runAgent(mission.prompt, undefined, () => {}, undefined, undefined, abortController, undefined, agentMcpAllowlist);
+      const result = await runAgentWithRetry(
+        mission.prompt, undefined, () => {}, undefined, undefined,
+        abortController, undefined,
+        (attempt, err) => logger.warn({ missionId: mission.id, attempt, category: err.category }, 'Retrying mission task'),
+        undefined, agentMcpAllowlist,
+      );
       clearTimeout(timeout);
 
+      const missionTimeoutMins = Math.round(MISSION_TIMEOUT_MS / 60000);
       if (result.aborted) {
-        completeMissionTask(mission.id, null, 'failed', 'Timed out after 10 minutes');
+        completeMissionTask(mission.id, null, 'failed', `Timed out after ${missionTimeoutMins} minutes`);
         logger.warn({ missionId: mission.id }, 'Mission task timed out');
         try {
           await sender('Mission task timed out: "' + mission.title + '"');

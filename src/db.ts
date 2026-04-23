@@ -367,6 +367,10 @@ export function initDatabase(): void {
 
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
+  // Multiple PM2 processes (main + sub-agents) share the same SQLite file.
+  // Without a busy timeout, transient write contention throws SQLITE_BUSY
+  // immediately and can interrupt scheduler ticks.
+  db.pragma('busy_timeout = 10000');
   createSchema(db);
   runMigrations(db);
 

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
@@ -134,6 +135,57 @@ export interface AgentResult {
   aborted?: boolean;
 }
 
+interface ClaudeCliDiagnostic {
+  category: 'billing' | 'auth' | 'unknown';
+  userMessage: string;
+}
+
+/**
+ * The SDK often surfaces CLI failures only as "exited with code 1".
+ * Probe the local CLI directly so we can identify usage-limit/auth cases
+ * and avoid pointless retry loops on unrecoverable errors.
+ */
+function diagnoseExitCodeOne(env: NodeJS.ProcessEnv): ClaudeCliDiagnostic {
+  try {
+    execFileSync('claude', ['-p', 'Reply with exactly: ok'], {
+      encoding: 'utf8',
+      timeout: 15000,
+      windowsHide: true,
+      env,
+    });
+    return { category: 'unknown', userMessage: 'Claude Code process exited with code 1.' };
+  } catch (probeErr) {
+    const e = probeErr as Error & { stdout?: string | Buffer; stderr?: string | Buffer };
+    const rawText = [
+      typeof e.stdout === 'string' ? e.stdout : e.stdout?.toString?.() ?? '',
+      typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString?.() ?? '',
+      e.message ?? '',
+    ].join('\n').toLowerCase();
+
+    if (rawText.includes('hit your limit') || rawText.includes('usage limit') || rawText.includes('resets')) {
+      return {
+        category: 'billing',
+        userMessage: 'Claude usage limit reached. Wait for reset or set ANTHROPIC_API_KEY in .env for pay-per-use fallback.',
+      };
+    }
+
+    if (
+      rawText.includes('login required')
+      || rawText.includes('not authenticated')
+      || rawText.includes('authentication')
+      || rawText.includes('token expired')
+      || rawText.includes('oauth')
+    ) {
+      return {
+        category: 'auth',
+        userMessage: 'Claude authentication failed. Run `claude login` and restart the agents.',
+      };
+    }
+
+    return { category: 'unknown', userMessage: 'Claude Code process exited with code 1.' };
+  }
+}
+
 /**
  * A minimal AsyncIterable that yields a single user message then closes.
  * This is the format the Claude Agent SDK expects for its `prompt` parameter.
@@ -189,10 +241,17 @@ export async function runAgent(
   // Strip inherited Claude Code CLI env vars. If the parent process was itself
   // launched from inside a Claude Code session, these vars leak in and cause
   // the spawned `claude` subprocess to detect a nested session and exit 1.
-  delete sdkEnv.CLAUDECODE;
-  delete sdkEnv.CLAUDE_CODE_ENTRYPOINT;
-  delete sdkEnv.CLAUDE_CODE_EXECPATH;
-  delete sdkEnv.CLAUDE_CODE_SSE_PORT;
+  for (const key of [
+    'CLAUDECODE',
+    'CLAUDE_CODE_ENTRYPOINT',
+    'CLAUDE_CODE_EXECPATH',
+    'CLAUDE_CODE_SSE_PORT',
+    'CLAUDE_CODE_IPC_PORT',
+    'CLAUDE_CODE_MAX_OUTPUT_TOKENS',
+    'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
+  ]) {
+    delete sdkEnv[key];
+  }
   if (secrets.CLAUDE_CODE_OAUTH_TOKEN) {
     sdkEnv.CLAUDE_CODE_OAUTH_TOKEN = secrets.CLAUDE_CODE_OAUTH_TOKEN;
   }
@@ -378,6 +437,30 @@ export async function runAgent(
     if (abortController?.signal.aborted) {
       logger.info('Agent query aborted by user');
       return { text: null, newSessionId, usage, aborted: true };
+    }
+
+    // SDK can hide true root cause behind a generic "exited with code 1".
+    const raw = err instanceof Error ? err : new Error(String(err));
+    if (raw.message.includes('exited with code 1')) {
+      const diag = diagnoseExitCodeOne(sdkEnv as NodeJS.ProcessEnv);
+      if (diag.category === 'billing') {
+        throw new AgentError('billing', {
+          shouldRetry: false,
+          shouldNewChat: false,
+          shouldSwitchModel: true,
+          retryAfterMs: 0,
+          userMessage: diag.userMessage,
+        }, raw);
+      }
+      if (diag.category === 'auth') {
+        throw new AgentError('auth', {
+          shouldRetry: false,
+          shouldNewChat: false,
+          shouldSwitchModel: false,
+          retryAfterMs: 0,
+          userMessage: diag.userMessage,
+        }, raw);
+      }
     }
 
     // Classify the error and attach context-aware metadata
