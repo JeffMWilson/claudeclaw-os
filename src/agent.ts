@@ -139,6 +139,120 @@ interface ClaudeCliDiagnostic {
   category: 'billing' | 'auth' | 'unknown';
   userMessage: string;
 }
+interface OllamaFallbackSettings {
+  enabled: boolean;
+  host: string;
+  model: string;
+  numCtx: number;
+  maxTokens: number;
+  timeoutMs: number;
+}
+
+interface OllamaGenerateResponse {
+  response?: string;
+  done?: boolean;
+  total_duration?: number;
+  eval_count?: number;
+  prompt_eval_count?: number;
+}
+
+function parseIntOrDefault(value: string | undefined, fallback: number): number {
+  const parsed = parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function loadOllamaFallbackSettings(): OllamaFallbackSettings {
+  const env = readEnvFile([
+    'OLLAMA_FALLBACK_ENABLED',
+    'OLLAMA_HOST',
+    'OLLAMA_FALLBACK_MODEL',
+    'OLLAMA_FALLBACK_CTX',
+    'OLLAMA_FALLBACK_MAX_TOKENS',
+    'OLLAMA_FALLBACK_TIMEOUT_MS',
+    'LLM_DEFAULT_MODEL',
+    'LLM_DEFAULT_CTX',
+    'LLM_MAX_OUTPUT_TOKENS',
+  ]);
+
+  const enabledRaw = process.env.OLLAMA_FALLBACK_ENABLED ?? env.OLLAMA_FALLBACK_ENABLED ?? 'true';
+  const host = process.env.OLLAMA_HOST ?? env.OLLAMA_HOST ?? 'http://localhost:11434';
+  const model = process.env.OLLAMA_FALLBACK_MODEL ?? env.OLLAMA_FALLBACK_MODEL ?? process.env.LLM_DEFAULT_MODEL ?? env.LLM_DEFAULT_MODEL ?? 'gemma4:26b';
+  const numCtx = parseIntOrDefault(
+    process.env.OLLAMA_FALLBACK_CTX ?? env.OLLAMA_FALLBACK_CTX ?? process.env.LLM_DEFAULT_CTX ?? env.LLM_DEFAULT_CTX,
+    2048,
+  );
+  const maxTokens = parseIntOrDefault(
+    process.env.OLLAMA_FALLBACK_MAX_TOKENS ?? env.OLLAMA_FALLBACK_MAX_TOKENS ?? process.env.LLM_MAX_OUTPUT_TOKENS ?? env.LLM_MAX_OUTPUT_TOKENS,
+    512,
+  );
+  const timeoutMs = parseIntOrDefault(
+    process.env.OLLAMA_FALLBACK_TIMEOUT_MS ?? env.OLLAMA_FALLBACK_TIMEOUT_MS,
+    120000,
+  );
+
+  return {
+    enabled: enabledRaw.toLowerCase() === 'true',
+    host,
+    model,
+    numCtx,
+    maxTokens,
+    timeoutMs,
+  };
+}
+
+function shouldUseOllamaFallback(err: AgentError): boolean {
+  return err.category === 'billing' || err.category === 'rate_limit' || err.category === 'overloaded';
+}
+
+async function runOllamaFallback(
+  message: string,
+  sessionId: string | undefined,
+  settings: OllamaFallbackSettings,
+  abortController?: AbortController,
+): Promise<AgentResult> {
+  const timeoutAbort = new AbortController();
+  const timeout = setTimeout(() => timeoutAbort.abort(), settings.timeoutMs);
+  const externalAbortHandler = () => timeoutAbort.abort();
+  abortController?.signal.addEventListener('abort', externalAbortHandler, { once: true });
+
+  try {
+    const response = await fetch(`${settings.host.replace(/\/+$/, '')}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: timeoutAbort.signal,
+      body: JSON.stringify({
+        model: settings.model,
+        stream: false,
+        prompt: message,
+        options: {
+          num_ctx: settings.numCtx,
+          num_predict: settings.maxTokens,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama fallback HTTP ${response.status} ${response.statusText}`);
+    }
+
+    const payload = await response.json() as OllamaGenerateResponse;
+    const text = payload.response?.trim();
+
+    return {
+      text: text && text.length > 0 ? text : 'Local Ollama fallback returned an empty response.',
+      newSessionId: sessionId,
+      usage: null,
+    };
+  } catch (err) {
+    if (abortController?.signal.aborted) {
+      return { text: null, newSessionId: sessionId, usage: null, aborted: true };
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+    abortController?.signal.removeEventListener('abort', externalAbortHandler);
+  }
+}
 
 /**
  * The SDK often surfaces CLI failures only as "exited with code 1".
@@ -506,6 +620,7 @@ export async function runAgentWithRetry(
   mcpAllowlist?: string[],
 ): Promise<AgentResult> {
   let lastError: AgentError | undefined;
+  const ollamaFallback = loadOllamaFallbackSettings();
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -523,14 +638,50 @@ export async function runAgentWithRetry(
     } catch (err) {
       if (!(err instanceof AgentError)) throw err;
       lastError = err;
+      if (abortController?.signal.aborted) {
+        throw err;
+      }
+
+      const canSwitchClaudeModel = !!(
+        err.recovery.shouldSwitchModel
+        && fallbackModels?.length
+        && attempt < fallbackModels.length
+      );
+      if (canSwitchClaudeModel) {
+        logger.warn(
+          {
+            category: err.category,
+            fromAttempt: attempt,
+            toModel: fallbackModels![Math.min(attempt, fallbackModels!.length - 1)],
+          },
+          'Switching Claude model for next attempt',
+        );
+        continue;
+      }
 
       // Don't retry non-retryable errors or if aborted
-      if (!err.recovery.shouldRetry || abortController?.signal.aborted) {
+      if (!err.recovery.shouldRetry) {
+        if (ollamaFallback.enabled && shouldUseOllamaFallback(err)) {
+          try {
+            logger.warn({ category: err.category, model: ollamaFallback.model }, 'Claude failed, using Ollama fallback');
+            return await runOllamaFallback(message, sessionId, ollamaFallback, abortController);
+          } catch (fallbackErr) {
+            logger.error({ err: fallbackErr, category: err.category }, 'Ollama fallback failed');
+          }
+        }
         throw err;
       }
 
       // Don't retry past the limit
       if (attempt >= MAX_RETRIES) {
+        if (ollamaFallback.enabled && shouldUseOllamaFallback(err)) {
+          try {
+            logger.warn({ category: err.category, model: ollamaFallback.model }, 'Claude retries exhausted, using Ollama fallback');
+            return await runOllamaFallback(message, sessionId, ollamaFallback, abortController);
+          } catch (fallbackErr) {
+            logger.error({ err: fallbackErr, category: err.category }, 'Ollama fallback failed after Claude retries');
+          }
+        }
         throw err;
       }
 

@@ -313,6 +313,22 @@ function createSchema(database: Database.Database): void {
         VALUES (new.id, new.summary, new.raw_text, new.entities, new.topics);
     END;
 
+    -- Protocol failure tracking (agent accountability)
+    CREATE TABLE IF NOT EXISTS protocol_failures (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id        TEXT NOT NULL,
+      incident_date   INTEGER NOT NULL,
+      protocol_name   TEXT NOT NULL,
+      description     TEXT NOT NULL,
+      time_cost_min   INTEGER NOT NULL DEFAULT 0,
+      root_cause      TEXT NOT NULL DEFAULT '',
+      protocol_existed INTEGER NOT NULL DEFAULT 1,
+      logged_by       TEXT NOT NULL DEFAULT 'finance',
+      created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_protocol_failures_agent ON protocol_failures(agent_id, incident_date DESC);
+    CREATE INDEX IF NOT EXISTS idx_protocol_failures_date ON protocol_failures(incident_date DESC);
+
     -- Phase 2.4: Compaction event tracking
     CREATE TABLE IF NOT EXISTS compaction_events (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2419,4 +2435,364 @@ export function getWarRoomTranscript(meetingId: string): Array<{
   return db.prepare(
     'SELECT speaker, text, created_at FROM warroom_transcript WHERE meeting_id = ? ORDER BY created_at',
   ).all(meetingId) as any[];
+}
+
+// ── Local LLM Queue (Ollama/Gemma background tasks) ─────────────────
+
+export interface LocalLlmTask {
+  id: string;
+  task_type: string;
+  input: string;
+  title: string;
+  priority: number;
+  model: string;
+  num_ctx: number;
+  /** Per-task output cap. 0 = use worker default. */
+  num_predict: number;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  output: string | null;
+  error: string | null;
+  tokens_in: number;
+  tokens_out: number;
+  duration_ms: number;
+  created_by: string;
+  created_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+}
+
+export interface LocalLlmStats {
+  queued: number;
+  running: number;
+  completed: number;
+  failed: number;
+  total: number;
+  totalTokensOut: number;
+  totalDurationMs: number;
+}
+
+function ensureLocalLlmQueueTable(): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS local_llm_queue (
+      id            TEXT PRIMARY KEY,
+      task_type     TEXT NOT NULL DEFAULT 'general',
+      input         TEXT NOT NULL,
+      title         TEXT NOT NULL DEFAULT '',
+      priority      INTEGER NOT NULL DEFAULT 5,
+      model         TEXT NOT NULL DEFAULT 'gemma4:26b',
+      num_ctx       INTEGER NOT NULL DEFAULT 4096,
+      num_predict   INTEGER NOT NULL DEFAULT 0,
+      status        TEXT NOT NULL DEFAULT 'queued',
+      output        TEXT,
+      error         TEXT,
+      tokens_in     INTEGER NOT NULL DEFAULT 0,
+      tokens_out    INTEGER NOT NULL DEFAULT 0,
+      duration_ms   INTEGER NOT NULL DEFAULT 0,
+      created_by    TEXT NOT NULL DEFAULT 'manual',
+      created_at    INTEGER NOT NULL,
+      started_at    INTEGER,
+      completed_at  INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_llm_queue_status
+      ON local_llm_queue(status, priority DESC, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_llm_queue_created
+      ON local_llm_queue(created_at DESC);
+  `);
+
+  // Backward-compatible schema patch for existing databases.
+  const cols = db.prepare(`PRAGMA table_info(local_llm_queue)`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'num_predict')) {
+    db.exec(`ALTER TABLE local_llm_queue ADD COLUMN num_predict INTEGER NOT NULL DEFAULT 0;`);
+  }
+}
+
+export function createLocalLlmTask(
+  id: string,
+  taskType: string,
+  input: string,
+  title: string,
+  priority: number,
+  model: string,
+  numCtx: number,
+  numPredict: number,
+  createdBy: string,
+): void {
+  ensureLocalLlmQueueTable();
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare(
+    `INSERT INTO local_llm_queue (id, task_type, input, title, priority, model, num_ctx, num_predict, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, taskType, input, title, priority, model, numCtx, numPredict, createdBy, now);
+}
+
+export function getLocalLlmTasks(status?: string, limit = 30): LocalLlmTask[] {
+  ensureLocalLlmQueueTable();
+  if (status) {
+    return db
+      .prepare(
+        `SELECT * FROM local_llm_queue WHERE status = ?
+         ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+           priority DESC, created_at DESC
+         LIMIT ?`,
+      )
+      .all(status, limit) as LocalLlmTask[];
+  }
+  return db
+    .prepare(
+      `SELECT * FROM local_llm_queue
+       ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+         priority DESC, created_at DESC
+       LIMIT ?`,
+    )
+    .all(limit) as LocalLlmTask[];
+}
+
+export function getLocalLlmTask(id: string): LocalLlmTask | null {
+  ensureLocalLlmQueueTable();
+  return (db.prepare('SELECT * FROM local_llm_queue WHERE id = ?').get(id) as LocalLlmTask) ?? null;
+}
+
+export function cancelLocalLlmTask(id: string): boolean {
+  ensureLocalLlmQueueTable();
+  const result = db.prepare(
+    `UPDATE local_llm_queue SET status = 'cancelled', completed_at = ? WHERE id = ? AND status IN ('queued', 'running')`,
+  ).run(Math.floor(Date.now() / 1000), id);
+  return result.changes > 0;
+}
+
+export function getLocalLlmStats(hours = 24): LocalLlmStats {
+  ensureLocalLlmQueueTable();
+  const cutoff = Math.floor(Date.now() / 1000) - hours * 3600;
+  const queued = (db.prepare(`SELECT COUNT(*) as c FROM local_llm_queue WHERE status = 'queued'`).get() as { c: number }).c;
+  const running = (db.prepare(`SELECT COUNT(*) as c FROM local_llm_queue WHERE status = 'running'`).get() as { c: number }).c;
+  const completed = (db.prepare(`SELECT COUNT(*) as c FROM local_llm_queue WHERE status = 'completed' AND completed_at >= ?`).get(cutoff) as { c: number }).c;
+  const failed = (db.prepare(`SELECT COUNT(*) as c FROM local_llm_queue WHERE status = 'failed' AND completed_at >= ?`).get(cutoff) as { c: number }).c;
+  const totals = db.prepare(
+    `SELECT COALESCE(SUM(tokens_out), 0) as totalTokensOut, COALESCE(SUM(duration_ms), 0) as totalDurationMs
+     FROM local_llm_queue WHERE status = 'completed' AND completed_at >= ?`,
+  ).get(cutoff) as { totalTokensOut: number; totalDurationMs: number };
+  return { queued, running, completed, failed, total: queued + running + completed + failed, totalTokensOut: totals.totalTokensOut, totalDurationMs: totals.totalDurationMs };
+}
+
+export function claimNextLocalLlmTask(): LocalLlmTask | null {
+  ensureLocalLlmQueueTable();
+  const txn = db.transaction(() => {
+    const task = db
+      .prepare(`SELECT * FROM local_llm_queue WHERE status = 'queued' ORDER BY priority DESC, created_at ASC LIMIT 1`)
+      .get() as LocalLlmTask | undefined;
+    if (!task) return null;
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(`UPDATE local_llm_queue SET status = 'running', started_at = ? WHERE id = ?`).run(now, task.id);
+    return { ...task, status: 'running' as const, started_at: now };
+  });
+  return txn();
+}
+
+export function completeLocalLlmTask(
+  id: string,
+  output: string | null,
+  status: 'completed' | 'failed',
+  tokensIn: number,
+  tokensOut: number,
+  durationMs: number,
+  error?: string,
+): void {
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare(
+    `UPDATE local_llm_queue SET status = ?, output = ?, error = ?, tokens_in = ?, tokens_out = ?, duration_ms = ?, completed_at = ? WHERE id = ?`,
+  ).run(status, output, error ?? null, tokensIn, tokensOut, durationMs, now, id);
+}
+
+export function cleanupOldLocalLlmTasks(olderThanDays = 7): number {
+  ensureLocalLlmQueueTable();
+  const cutoff = Math.floor(Date.now() / 1000) - olderThanDays * 86400;
+  const result = db.prepare(
+    `DELETE FROM local_llm_queue WHERE status IN ('completed', 'failed', 'cancelled') AND completed_at < ?`,
+  ).run(cutoff);
+  return result.changes;
+}
+
+// ── Robert August IP Indexer Status ─────────────────────────────────
+
+export interface IndexerStatus {
+  completed: number;
+  failed: number;
+  pending: number;
+  total: number;
+  latestFile: string | null;
+  latestProcessedAt: string | null;
+  avgProcessingMs: number;
+}
+
+// ── Protocol Failure Tracking ──────────────────────────────────────
+
+export interface ProtocolFailure {
+  id: number;
+  agent_id: string;
+  incident_date: number;
+  protocol_name: string;
+  description: string;
+  time_cost_min: number;
+  root_cause: string;
+  protocol_existed: number;
+  logged_by: string;
+  created_at: number;
+}
+
+export interface ProtocolFailureSummary {
+  agent_id: string;
+  total_incidents: number;
+  total_minutes: number;
+  last_30d_incidents: number;
+  last_30d_minutes: number;
+  last_7d_incidents: number;
+}
+
+export function createProtocolFailure(
+  agentId: string,
+  incidentDate: number,
+  protocolName: string,
+  description: string,
+  timeCostMin: number,
+  rootCause: string,
+  protocolExisted: boolean,
+  loggedBy: string,
+): number {
+  const result = db
+    .prepare(
+      `INSERT INTO protocol_failures (agent_id, incident_date, protocol_name, description, time_cost_min, root_cause, protocol_existed, logged_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(agentId, incidentDate, protocolName, description, timeCostMin, rootCause, protocolExisted ? 1 : 0, loggedBy);
+  return result.lastInsertRowid as number;
+}
+
+export function getProtocolFailures(opts?: {
+  agentId?: string;
+  since?: number;
+  limit?: number;
+}): ProtocolFailure[] {
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (opts?.agentId) {
+    conditions.push('agent_id = ?');
+    params.push(opts.agentId);
+  }
+  if (opts?.since) {
+    conditions.push('incident_date >= ?');
+    params.push(opts.since);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const limit = opts?.limit ?? 100;
+
+  return db
+    .prepare(`SELECT * FROM protocol_failures ${where} ORDER BY incident_date DESC LIMIT ?`)
+    .all(...params, limit) as ProtocolFailure[];
+}
+
+export function getProtocolFailureSummary(): ProtocolFailureSummary[] {
+  const now = Math.floor(Date.now() / 1000);
+  const thirtyDaysAgo = now - 30 * 86400;
+  const sevenDaysAgo = now - 7 * 86400;
+
+  return db
+    .prepare(
+      `SELECT
+        agent_id,
+        COUNT(*) as total_incidents,
+        SUM(time_cost_min) as total_minutes,
+        SUM(CASE WHEN incident_date >= ? THEN 1 ELSE 0 END) as last_30d_incidents,
+        SUM(CASE WHEN incident_date >= ? THEN time_cost_min ELSE 0 END) as last_30d_minutes,
+        SUM(CASE WHEN incident_date >= ? THEN 1 ELSE 0 END) as last_7d_incidents
+      FROM protocol_failures
+      GROUP BY agent_id
+      ORDER BY total_minutes DESC`,
+    )
+    .all(thirtyDaysAgo, thirtyDaysAgo, sevenDaysAgo) as ProtocolFailureSummary[];
+}
+
+export function getProtocolFailureSystemTotal(): {
+  total_incidents: number;
+  total_minutes: number;
+  last_30d_incidents: number;
+  last_30d_minutes: number;
+} {
+  const now = Math.floor(Date.now() / 1000);
+  const thirtyDaysAgo = now - 30 * 86400;
+
+  return db
+    .prepare(
+      `SELECT
+        COUNT(*) as total_incidents,
+        SUM(time_cost_min) as total_minutes,
+        SUM(CASE WHEN incident_date >= ? THEN 1 ELSE 0 END) as last_30d_incidents,
+        SUM(CASE WHEN incident_date >= ? THEN time_cost_min ELSE 0 END) as last_30d_minutes
+      FROM protocol_failures`,
+    )
+    .get(thirtyDaysAgo, thirtyDaysAgo) as {
+    total_incidents: number;
+    total_minutes: number;
+    last_30d_incidents: number;
+    last_30d_minutes: number;
+  };
+}
+
+export function getProtocolFailure7dAlerts(): { agent_id: string; count: number }[] {
+  const sevenDaysAgo = Math.floor(Date.now() / 1000) - 7 * 86400;
+  return db
+    .prepare(
+      `SELECT agent_id, COUNT(*) as count
+       FROM protocol_failures
+       WHERE incident_date >= ?
+       GROUP BY agent_id
+       HAVING count >= 2
+       ORDER BY count DESC`,
+    )
+    .all(sevenDaysAgo) as { agent_id: string; count: number }[];
+}
+
+export function deleteProtocolFailure(id: number): boolean {
+  const result = db.prepare('DELETE FROM protocol_failures WHERE id = ?').run(id);
+  return result.changes > 0;
+}
+
+export function getIndexerStatus(): IndexerStatus {
+  try {
+    const counts = db
+      .prepare(
+        `SELECT
+          COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as completed,
+          COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed,
+          COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) as pending,
+          COUNT(*) as total
+        FROM robert_august_index`,
+      )
+      .get() as { completed: number; failed: number; pending: number; total: number };
+
+    const latest = db
+      .prepare(
+        `SELECT file_name, processed_at FROM robert_august_index
+        WHERE status = 'completed' ORDER BY processed_at DESC LIMIT 1`,
+      )
+      .get() as { file_name: string; processed_at: string } | undefined;
+
+    const avgRow = db
+      .prepare(
+        `SELECT AVG(processing_time_ms) as avg_ms FROM robert_august_index
+        WHERE status = 'completed'`,
+      )
+      .get() as { avg_ms: number | null } | undefined;
+
+    return {
+      ...counts,
+      latestFile: latest?.file_name || null,
+      latestProcessedAt: latest?.processed_at || null,
+      avgProcessingMs: avgRow?.avg_ms || 0,
+    };
+  } catch {
+    // Table may not exist yet
+    return { completed: 0, failed: 0, pending: 0, total: 0, latestFile: null, latestProcessedAt: null, avgProcessingMs: 0 };
+  }
 }

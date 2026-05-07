@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AgentError } from './errors.js';
 
 // Mock the SDK query function before importing agent
@@ -38,6 +38,7 @@ const mockQuery = query as any;
 const mockExecFileSync = vi.mocked(execFileSync);
 const mockLoggerWarn = vi.mocked(logger.warn);
 const noop = () => {};
+const mockFetch = vi.fn();
 
 /**
  * Create a mock async iterable that yields events then closes.
@@ -63,6 +64,9 @@ function resultEvent(text: string) {
 describe('runAgentWithRetry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.OLLAMA_FALLBACK_ENABLED = 'false';
+    vi.stubGlobal('fetch', mockFetch);
+    mockFetch.mockReset();
   });
 
   it('returns result on first try when no error', async () => {
@@ -268,6 +272,10 @@ describe('runAgentWithRetry', () => {
     expect(mockExecFileSync).toHaveBeenCalledTimes(1);
   });
 
+  afterEach(() => {
+    delete process.env.OLLAMA_FALLBACK_ENABLED;
+    vi.unstubAllGlobals();
+  });
   it('classifies exit-code-1 as auth when CLI probe reports login required', async () => {
     mockQuery.mockImplementation(() => {
       throw new Error('Claude Code process exited with code 1');
@@ -294,5 +302,31 @@ describe('runAgentWithRetry', () => {
 
     expect(mockQuery).toHaveBeenCalledTimes(1);
     expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses Ollama fallback on billing errors when enabled', async () => {
+    process.env.OLLAMA_FALLBACK_ENABLED = 'true';
+    mockQuery.mockImplementation(() => {
+      throw new AgentError('billing', {
+        shouldRetry: false,
+        shouldNewChat: false,
+        shouldSwitchModel: true,
+        retryAfterMs: 0,
+        userMessage: 'usage limit',
+      });
+    });
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ response: 'Local fallback answer' }),
+    });
+
+    const result = await runAgentWithRetry('hi', 'sess-1', noop);
+    expect(result.text).toBe('Local fallback answer');
+    expect(result.newSessionId).toBe('sess-1');
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });
